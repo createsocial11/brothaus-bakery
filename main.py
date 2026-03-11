@@ -1,30 +1,10 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import math
 import os
 import random
-
-try:
-    import google.generativeai as genai
-    from dotenv import load_dotenv
-    load_dotenv()
-    api_key = os.getenv("GEMINI_API_KEY")
-    if api_key:
-        genai.configure(api_key=api_key)
-        gemini_model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            system_instruction="""You are Klaus, a friendly expert German baker at BrotHaus bakery.
-            You know recipes for Brezel, Schwarzbrot, Stollen, Broetchen and more.
-            Always respond warmly, use occasional German words like Wunderbar or Guten Morgen,
-            and give helpful practical baking tips. Keep responses concise."""
-        )
-        AI_AVAILABLE = True
-    else:
-        AI_AVAILABLE = False
-except Exception:
-    AI_AVAILABLE = False
 
 app = FastAPI(title="BrotHaus Bakery API", version="2.0.0")
 
@@ -37,6 +17,10 @@ app.add_middleware(
 
 class ChatMessage(BaseModel):
     text: str
+
+class SimulationRequest(BaseModel):
+    days: Optional[int] = 100
+    promo_active: Optional[bool] = False
 
 class ForecastRequest(BaseModel):
     yesterday_units: float
@@ -62,14 +46,6 @@ class ForecastRequest(BaseModel):
     volatility: int
     demand_percentile: int
 
-class SimulationRequest(BaseModel):
-    days: Optional[int] = 100
-    promo_active: Optional[bool] = False
-
-def poisson_approx(lam, rng):
-    val = rng.gauss(lam, math.sqrt(lam))
-    return max(int(round(val)), 0)
-
 def run_simulation(days=100, promo_active=False, seed=42):
     rng = random.Random(seed)
     PRODUCTS = ["Pretzel", "Bread", "Cake"]
@@ -79,19 +55,16 @@ def run_simulation(days=100, promo_active=False, seed=42):
     daily_revenues = []
     daily_customers = []
     product_totals = {"Pretzel": 0, "Bread": 0, "Cake": 0}
-    hourly_avg = [0.0] * 12
 
     for day in range(days):
         probs = PROB_PRMO if promo_active else PROB_NORM
         day_rev = 0
         day_cust = 0
-        hour_counts = []
         for h in range(12):
             actual_hour = 8 + h
             is_peak = 12 <= actual_hour < 14
             lam = 15 * 1.4 if is_peak else 15
-            count = poisson_approx(lam, rng)
-            hour_counts.append(count)
+            count = max(int(round(rng.gauss(lam, math.sqrt(lam)))), 0)
             for _ in range(count):
                 r = rng.random()
                 cumulative = 0
@@ -106,8 +79,6 @@ def run_simulation(days=100, promo_active=False, seed=42):
             day_cust += count
         daily_revenues.append(day_rev)
         daily_customers.append(day_cust)
-        for i, c in enumerate(hour_counts):
-            hourly_avg[i] += c / days
 
     avg_rev = round(sum(daily_revenues) / len(daily_revenues))
     std_rev = round(math.sqrt(sum((r - avg_rev)**2 for r in daily_revenues) / len(daily_revenues)))
@@ -117,82 +88,20 @@ def run_simulation(days=100, promo_active=False, seed=42):
 
     return {
         "days": days,
-        "promo_active": promo_active,
         "avg_daily_revenue": avg_rev,
         "std_deviation": std_rev,
         "min_revenue": min(daily_revenues),
         "max_revenue": max(daily_revenues),
-        "median_revenue": sorted(daily_revenues)[len(daily_revenues)//2],
         "coefficient_of_variation": cv,
         "avg_customers_per_day": avg_cust,
         "most_popular_product": top_prod,
         "product_totals": product_totals,
         "daily_revenues": daily_revenues,
-        "hourly_averages": [round(x, 1) for x in hourly_avg],
-    }
-
-def run_forecast(r):
-    base = r.yesterday_units
-    day_w = {1:0.85,2:0.90,3:0.92,4:0.95,5:1.10,6:1.35,7:1.20}
-    day_effect     = round(base * (day_w.get(r.today_day, 1.0) - 1.0))
-    weather_effect = 12 if r.weather == 1 else -10
-    temp_effect    = (-8 if r.temperature < 0 else -3 if r.temperature < 10
-                      else 5 if r.temperature < 20 else 8 if r.temperature < 30 else 2)
-    rain_effect    = -18 if r.rainfall == 1 else 0
-    holiday_effect = 18  if r.public_holiday == 1 else 0
-    school_effect  = 14  if r.school_holiday == 1 else 0
-    promo_effect   = 20  if r.promotion == 1 else 0
-    event_effect   = 22  if r.local_event == 1 else 0
-    rush_effect    = (25 if r.morning_rush==1 and r.today_day<=5 else 15 if r.morning_rush==1 else 0)
-    launch_effect  = 30  if r.new_product == 1 else 0
-    staff_effect   = 0   if r.staff_full == 1 else -25
-    seasonal_effect= 45  if r.seasonal == 1 else 0
-    bulk_effect    = 35  if r.bulk_order == 1 else 0
-    week_effect    = {1:12,2:5,3:-3,4:-10}.get(r.week_of_month, 0)
-    mood_effect    = {3:20,2:0,1:-15}.get(r.customer_mood, 0)
-    arrival_effect = {1:-18,2:0,3:22}.get(r.arrival_rate, 0)
-    peak_effect    = 16 if r.peak_hour == 1 else 0
-    festival_effect= 18 if r.pretzel_festival == 1 else 0
-    mix_effect     = {1:14,2:0,3:-10}.get(r.product_mix, 0)
-    vol_effect     = {1:8,2:0,3:-12}.get(r.volatility, 0)
-    pct_effect     = {1:-20,2:0,3:25}.get(r.demand_percentile, 0)
-
-    predicted = max(int(round(
-        base + day_effect + weather_effect + temp_effect + rain_effect
-        + holiday_effect + school_effect + promo_effect + event_effect
-        + rush_effect + launch_effect + staff_effect + seasonal_effect
-        + bulk_effect + week_effect + mood_effect
-        + arrival_effect + peak_effect + festival_effect
-        + mix_effect + vol_effect + pct_effect
-    )), 0)
-
-    margin    = max(int(round(predicted * 0.08)), 1)
-    avg_price = 60*0.5 + 180*0.3 + 220*0.2
-    revenue   = round(predicted * avg_price)
-    staff_rec = max(math.ceil(predicted / 40) + (1 if r.today_day >= 6 else 0), 2)
-    net       = predicted - int(r.yesterday_units)
-    total_adj = predicted - int(base)
-    grade = ("A" if total_adj > 80 else "B" if total_adj > 30 else "C" if total_adj > -20 else "D")
-
-    return {
-        "predicted_units": predicted,
-        "conservative": predicted - margin,
-        "optimistic": predicted + margin,
-        "vs_yesterday": net,
-        "expected_revenue": revenue,
-        "staff_recommended": staff_rec,
-        "demand_grade": grade,
-        "flour_kg": round(predicted * 0.150, 1),
-        "eggs": round(predicted * 0.3),
     }
 
 @app.get("/")
 def home():
-    return {"status": "BrotHaus Bakery AI is running! 🥨", "ai_available": AI_AVAILABLE}
-
-@app.post("/forecast")
-def get_forecast(request: ForecastRequest):
-    return run_forecast(request)
+    return {"status": "BrotHaus Bakery AI is running! 🥨", "version": "2.0"}
 
 @app.post("/simulate")
 def get_simulation(request: SimulationRequest):
@@ -200,39 +109,90 @@ def get_simulation(request: SimulationRequest):
     return run_simulation(days=days, promo_active=request.promo_active or False)
 
 @app.get("/simulate/compare")
-def compare_simulations():
-    normal = run_simulation(days=100, promo_active=False)
-    promo  = run_simulation(days=100, promo_active=True)
+def compare():
+    normal = run_simulation(100, False)
+    promo  = run_simulation(100, True)
     uplift = round((promo["avg_daily_revenue"] - normal["avg_daily_revenue"])
                    / normal["avg_daily_revenue"] * 100, 1)
-    return {"normal": normal, "promo": promo, "revenue_uplift_pct": uplift}
+    return {"normal": normal, "promo": promo, "uplift_pct": uplift}
+
+@app.post("/forecast")
+def get_forecast(r: ForecastRequest):
+    base = r.yesterday_units
+    day_w = {1:0.85,2:0.90,3:0.92,4:0.95,5:1.10,6:1.35,7:1.20}
+    predicted = max(int(round(
+        base
+        + round(base * (day_w.get(r.today_day, 1.0) - 1.0))
+        + (12 if r.weather==1 else -10)
+        + (-8 if r.temperature<0 else -3 if r.temperature<10 else 5 if r.temperature<20 else 8)
+        + (-18 if r.rainfall else 0)
+        + (18 if r.public_holiday else 0)
+        + (14 if r.school_holiday else 0)
+        + (20 if r.promotion else 0)
+        + (22 if r.local_event else 0)
+        + (25 if r.morning_rush and r.today_day<=5 else 15 if r.morning_rush else 0)
+        + (30 if r.new_product else 0)
+        + (0 if r.staff_full else -25)
+        + (45 if r.seasonal else 0)
+        + (35 if r.bulk_order else 0)
+        + {1:12,2:5,3:-3,4:-10}.get(r.week_of_month, 0)
+        + {3:20,2:0,1:-15}.get(r.customer_mood, 0)
+        + {1:-18,2:0,3:22}.get(r.arrival_rate, 0)
+        + (16 if r.peak_hour else 0)
+        + (18 if r.pretzel_festival else 0)
+        + {1:14,2:0,3:-10}.get(r.product_mix, 0)
+        + {1:8,2:0,3:-12}.get(r.volatility, 0)
+        + {1:-20,2:0,3:25}.get(r.demand_percentile, 0)
+    )), 0)
+    margin = max(int(round(predicted * 0.08)), 1)
+    revenue = round(predicted * (60*0.5 + 180*0.3 + 220*0.2))
+    staff = max(math.ceil(predicted/40) + (1 if r.today_day>=6 else 0), 2)
+    grade = "A" if predicted-base>80 else "B" if predicted-base>30 else "C" if predicted-base>-20 else "D"
+    return {
+        "predicted_units": predicted,
+        "conservative": predicted - margin,
+        "optimistic": predicted + margin,
+        "vs_yesterday": predicted - int(base),
+        "expected_revenue": revenue,
+        "staff_recommended": staff,
+        "demand_grade": grade,
+        "flour_kg": round(predicted * 0.15, 1),
+        "eggs": round(predicted * 0.3),
+    }
 
 @app.post("/chat")
-async def chat(message: ChatMessage):
-    if not AI_AVAILABLE:
-        return {"reply": "Guten Morgen! I am Klaus 🥨 AI chat needs a Gemini API key. Add GEMINI_API_KEY in Render environment variables!", "ai_mode": False}
-    try:
-        response = gemini_model.generate_content(message.text)
-        return {"reply": response.text, "ai_mode": True}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def chat(message: ChatMessage):
+    responses = {
+        "brezel": "Wunderbar! For Brezel: 500g flour, 7g yeast, 300ml warm water, 10g salt, 30g butter. Knead 10min, rest 1hr, shape, dip in baking soda solution, bake 220C for 15min! 🥨",
+        "recipe": "Guten Morgen! Ask me about Brezel, Schwarzbrot, Stollen or Brötchen and I will help! 🥐",
+        "sales": "Our peak hours are 12-2PM with 40% more customers! Saturday is our busiest day. The simulation shows avg revenue of Rs 27,000 per day! 📈",
+    }
+    text_lower = message.text.lower()
+    for key, response in responses.items():
+        if key in text_lower:
+            return {"reply": response, "ai_mode": False}
+    return {"reply": f"Guten Tag! You asked: '{message.text}'. I am Klaus your BrotHaus baker! Ask me about recipes, sales patterns, or our simulation results! 🥨", "ai_mode": False}
 
 @app.get("/recipe/{bread_name}")
-async def get_recipe(bread_name: str):
-    if not AI_AVAILABLE:
-        return {"recipe": f"Traditional German {bread_name}: flour, water, salt, yeast. Mix, knead, rest 1 hour, bake at 200C until golden!", "ai_mode": False}
-    try:
-        response = gemini_model.generate_content(f"Give a traditional German recipe for {bread_name} with ingredients and steps.")
-        return {"recipe": response.text, "ai_mode": True}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def get_recipe(bread_name: str):
+    recipes = {
+        "Brezel": "Classic Soft Pretzel: 500g flour, 7g yeast, 300ml warm water, 10g salt, 30g butter. Knead 10min, rest 1hr, shape, dip in 4% baking soda solution, bake 220C for 15min until deep brown. 🥨",
+        "Schwarzbrot": "Dark Rye Bread: 400g rye flour, 100g wheat flour, 15g salt, 7g yeast, 350ml water, 2 tbsp caraway seeds. Mix, ferment 2hrs, bake 180C for 60min.",
+        "Stollen": "Christmas Stollen: 500g flour, 200g butter, 200g dried fruit, 100g marzipan, cardamom, nutmeg. Mix, shape, bake 180C 45min, dust with icing sugar. 🎄",
+        "Brötchen": "German Rolls: 500g flour, 7g yeast, 300ml water, 10g salt, 1 tsp sugar. Knead, rest 1hr, shape rolls, bake 220C for 20min until golden. 🫓",
+        "Streuselkuchen": "Crumb Cake: Base: 300g flour, 100g butter, 100g sugar, 2 eggs. Topping: 200g flour, 100g butter, 80g sugar. Layer and bake 180C for 35min. 🍰",
+    }
+    recipe = recipes.get(bread_name, f"Traditional German {bread_name}: flour, water, salt, yeast. Mix, knead, rest, bake at 200C until golden! Wunderbar! 🥐")
+    return {"recipe": recipe, "ai_mode": False}
 
 @app.get("/products")
 def get_products():
     return {
         "products": [
-            {"name": "Pretzel", "price": 60,  "prob_normal": 0.50, "prob_promo": 0.70},
-            {"name": "Bread",   "price": 180, "prob_normal": 0.30, "prob_promo": 0.20},
-            {"name": "Cake",    "price": 220, "prob_normal": 0.20, "prob_promo": 0.10},
-        ]
+            {"name": "Pretzel", "emoji": "🥨", "price": 60,  "prob_normal": 0.50, "prob_promo": 0.70},
+            {"name": "Bread",   "emoji": "🍞", "price": 180, "prob_normal": 0.30, "prob_promo": 0.20},
+            {"name": "Cake",    "emoji": "🎂", "price": 220, "prob_normal": 0.20, "prob_promo": 0.10},
+        ],
+        "avg_ticket": 122,
+        "peak_hours": "12:00 - 14:00",
     }
