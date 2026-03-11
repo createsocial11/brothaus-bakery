@@ -1,18 +1,9 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-import math
-import os
-import random
 import json
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+import math
+import random
+import os
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
 def run_simulation(days=100, promo_active=False, seed=42):
     rng = random.Random(seed)
@@ -67,48 +58,30 @@ def run_simulation(days=100, promo_active=False, seed=42):
         "daily_revenues": daily_revenues,
     }
 
-@app.get("/")
-def home():
-    return {"status": "BrotHaus Bakery AI is running! 🥨"}
+def calc_forecast(p):
+    base = float(p.get("yesterday_units", [100])[0])
+    today_day = int(p.get("today_day", [1])[0])
+    weather = int(p.get("weather", [1])[0])
+    temperature = float(p.get("temperature", [18])[0])
+    rainfall = int(p.get("rainfall", [0])[0])
+    public_holiday = int(p.get("public_holiday", [0])[0])
+    school_holiday = int(p.get("school_holiday", [0])[0])
+    promotion = int(p.get("promotion", [0])[0])
+    local_event = int(p.get("local_event", [0])[0])
+    morning_rush = int(p.get("morning_rush", [0])[0])
+    new_product = int(p.get("new_product", [0])[0])
+    staff_full = int(p.get("staff_full", [1])[0])
+    seasonal = int(p.get("seasonal", [0])[0])
+    bulk_order = int(p.get("bulk_order", [0])[0])
+    week_of_month = int(p.get("week_of_month", [1])[0])
+    customer_mood = int(p.get("customer_mood", [2])[0])
+    arrival_rate = int(p.get("arrival_rate", [2])[0])
+    peak_hour = int(p.get("peak_hour", [0])[0])
+    pretzel_festival = int(p.get("pretzel_festival", [0])[0])
+    product_mix = int(p.get("product_mix", [2])[0])
+    volatility = int(p.get("volatility", [2])[0])
+    demand_percentile = int(p.get("demand_percentile", [2])[0])
 
-@app.get("/simulate")
-def get_simulation(days: int = 100, promo_active: bool = False):
-    return run_simulation(days=days, promo_active=promo_active)
-
-@app.get("/simulate/compare")
-def compare():
-    normal = run_simulation(100, False)
-    promo  = run_simulation(100, True)
-    uplift = round((promo["avg_daily_revenue"] - normal["avg_daily_revenue"])
-                   / normal["avg_daily_revenue"] * 100, 1)
-    return {"normal": normal, "promo": promo, "uplift_pct": uplift}
-
-@app.get("/forecast")
-def get_forecast(
-    yesterday_units: float = 100,
-    today_day: int = 1,
-    weather: int = 1,
-    temperature: float = 18,
-    rainfall: int = 0,
-    public_holiday: int = 0,
-    school_holiday: int = 0,
-    promotion: int = 0,
-    local_event: int = 0,
-    morning_rush: int = 0,
-    new_product: int = 0,
-    staff_full: int = 1,
-    seasonal: int = 0,
-    bulk_order: int = 0,
-    week_of_month: int = 1,
-    customer_mood: int = 2,
-    arrival_rate: int = 2,
-    peak_hour: int = 0,
-    pretzel_festival: int = 0,
-    product_mix: int = 2,
-    volatility: int = 2,
-    demand_percentile: int = 2
-):
-    base = yesterday_units
     day_w = {1:0.85,2:0.90,3:0.92,4:0.95,5:1.10,6:1.35,7:1.20}
     predicted = max(int(round(
         base
@@ -141,7 +114,7 @@ def get_forecast(
     return {
         "predicted_units": predicted,
         "conservative": predicted - margin,
-        "optimistic":   predicted + margin,
+        "optimistic": predicted + margin,
         "vs_yesterday": predicted - int(base),
         "expected_revenue": revenue,
         "staff_recommended": staff,
@@ -150,45 +123,89 @@ def get_forecast(
         "eggs": round(predicted * 0.3),
     }
 
-@app.get("/chat")
-def chat(text: str = "hello"):
-    text_lower = text.lower()
-    if "brezel" in text_lower or "pretzel" in text_lower:
-        reply = "Wunderbar! Brezel: 500g flour, 7g yeast, 300ml warm water, 10g salt, 30g butter. Knead 10min, rest 1hr, dip in baking soda solution, bake 220C for 15min! 🥨"
-    elif "schwarzbrot" in text_lower:
-        reply = "Schwarzbrot: 400g rye flour, 100g wheat flour, 15g salt, 7g yeast, 350ml water, caraway seeds. Ferment 2hrs, bake 180C for 60min. 🍞"
-    elif "stollen" in text_lower:
-        reply = "Christmas Stollen: 500g flour, 200g butter, 200g dried fruit, 100g marzipan, spices. Bake 180C 45min, dust with icing sugar! 🎄"
-    elif "peak" in text_lower or "hour" in text_lower:
-        reply = "Our peak hours are 12PM-2PM! Customer arrivals increase by 40% - from lambda=15 to lambda=21 per hour! 📈"
-    elif "simulation" in text_lower:
-        reply = "The simulation uses Poisson distribution with lambda=15 customers/hour for 12 hours. After 100 days the average revenue is around Rs 27,000! 📊"
-    elif "saturday" in text_lower or "weekend" in text_lower:
-        reply = "Saturday is our BEST day! 35% more sales than average. We recommend all staff on deck from opening time! 💪"
-    else:
-        reply = f"Guten Tag! You said: '{text}'. I am Klaus your BrotHaus baker! Ask me about Brezel, Schwarzbrot, Stollen, peak hours or the simulation! 🥨"
-    return {"reply": reply}
+RECIPES = {
+    "Brezel": "Classic Soft Pretzel: 500g flour, 7g yeast, 300ml warm water, 10g salt, 30g butter. Knead 10min, rest 1hr, shape, dip in baking soda solution, bake 220C for 15min! 🥨",
+    "Schwarzbrot": "Dark Rye Bread: 400g rye flour, 100g wheat flour, 15g salt, 7g yeast, 350ml water, caraway seeds. Ferment 2hrs, bake 180C for 60min. 🍞",
+    "Stollen": "Christmas Stollen: 500g flour, 200g butter, 200g dried fruit, 100g marzipan, spices. Bake 180C 45min, dust with icing sugar! 🎄",
+    "Brötchen": "German Rolls: 500g flour, 7g yeast, 300ml water, 10g salt. Knead, rest 1hr, shape, bake 220C for 20min! 🫓",
+    "Streuselkuchen": "Crumb Cake: 300g flour, 100g butter, 100g sugar, 2 eggs. Topping: 200g flour, 100g butter, 80g sugar. Bake 180C 35min! 🍰",
+}
 
-@app.get("/recipe/{bread_name}")
-def get_recipe(bread_name: str):
-    recipes = {
-        "Brezel": "Classic Soft Pretzel: 500g flour, 7g yeast, 300ml warm water, 10g salt, 30g butter. Knead 10min, rest 1hr, shape, dip in 4% baking soda solution, bake 220C for 15min until deep brown! 🥨",
-        "Schwarzbrot": "Dark Rye Bread: 400g rye flour, 100g wheat flour, 15g salt, 7g yeast, 350ml water, 2 tbsp caraway seeds. Mix, ferment 2hrs, bake 180C for 60min. 🍞",
-        "Stollen": "Christmas Stollen: 500g flour, 200g butter, 200g dried fruit, 100g marzipan, cardamom, nutmeg. Mix, shape, bake 180C 45min, dust with icing sugar. 🎄",
-        "Brötchen": "German Rolls: 500g flour, 7g yeast, 300ml water, 10g salt, 1 tsp sugar. Knead, rest 1hr, shape rolls, bake 220C for 20min until golden. 🫓",
-        "Streuselkuchen": "Crumb Cake: Base: 300g flour, 100g butter, 100g sugar, 2 eggs. Topping: 200g flour, 100g butter, 80g sugar. Layer and bake 180C for 35min. 🍰",
-    }
-    recipe = recipes.get(bread_name, f"Traditional German {bread_name}: flour, water, salt, yeast. Mix, knead, rest, bake at 200C until golden! 🥐")
-    return {"recipe": recipe}
+class Handler(BaseHTTPRequestHandler):
+    def send_json(self, data, status=200):
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Content-Length", len(body))
+        self.end_headers()
+        self.wfile.write(body)
 
-@app.get("/products")
-def get_products():
-    return {
-        "products": [
-            {"name": "Pretzel", "emoji": "🥨", "price": 60,  "prob_normal": 0.50, "prob_promo": 0.70},
-            {"name": "Bread",   "emoji": "🍞", "price": 180, "prob_normal": 0.30, "prob_promo": 0.20},
-            {"name": "Cake",    "emoji": "🎂", "price": 220, "prob_normal": 0.20, "prob_promo": 0.10},
-        ],
-        "avg_ticket": 122,
-        "peak_hours": "12:00 - 14:00",
-    }
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.end_headers()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        params = parse_qs(parsed.query)
+
+        if path == "" or path == "/":
+            self.send_json({"status": "BrotHaus Bakery AI is running! 🥨", "version": "2.0"})
+
+        elif path == "/simulate":
+            days = int(params.get("days", [100])[0])
+            promo = params.get("promo_active", ["false"])[0].lower() == "true"
+            self.send_json(run_simulation(days=days, promo_active=promo))
+
+        elif path == "/simulate/compare":
+            normal = run_simulation(100, False)
+            promo  = run_simulation(100, True)
+            uplift = round((promo["avg_daily_revenue"] - normal["avg_daily_revenue"])
+                           / normal["avg_daily_revenue"] * 100, 1)
+            self.send_json({"normal": normal, "promo": promo, "uplift_pct": uplift})
+
+        elif path == "/forecast":
+            self.send_json(calc_forecast(params))
+
+        elif path == "/chat":
+            text = params.get("text", ["hello"])[0].lower()
+            if "brezel" in text or "pretzel" in text:
+                reply = "Wunderbar! Brezel: 500g flour, 7g yeast, 300ml warm water, 10g salt. Knead, rest 1hr, dip in baking soda solution, bake 220C for 15min! 🥨"
+            elif "peak" in text or "hour" in text:
+                reply = "Peak hours are 12PM-2PM! Arrivals increase 40% — lambda goes from 15 to 21 per hour! 📈"
+            elif "simulation" in text:
+                reply = "Poisson simulation: lambda=15 customers/hour, 12 hours, 100 days. Avg revenue around Rs 27,000! 📊"
+            elif "schwarzbrot" in text:
+                reply = "Schwarzbrot: dark rye bread with caraway seeds. 400g rye flour, ferment 2hrs, bake 180C for 60min! 🍞"
+            else:
+                reply = f"Guten Tag! I am Klaus your BrotHaus baker! Ask me about Brezel, peak hours, or the simulation! 🥨"
+            self.send_json({"reply": reply})
+
+        elif path.startswith("/recipe/"):
+            name = path.split("/recipe/")[-1]
+            recipe = RECIPES.get(name, f"Traditional German {name}: flour, water, salt, yeast. Bake at 200C until golden! 🥐")
+            self.send_json({"recipe": recipe})
+
+        elif path == "/products":
+            self.send_json({"products": [
+                {"name": "Pretzel", "price": 60,  "prob_normal": 0.50, "prob_promo": 0.70},
+                {"name": "Bread",   "price": 180, "prob_normal": 0.30, "prob_promo": 0.20},
+                {"name": "Cake",    "price": 220, "prob_normal": 0.20, "prob_promo": 0.10},
+            ]})
+        else:
+            self.send_json({"error": "Not found"}, 404)
+
+    def log_message(self, format, *args):
+        pass
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    print(f"BrotHaus API starting on port {port}")
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    server.serve_forever()
